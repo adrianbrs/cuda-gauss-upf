@@ -4,3 +4,4 @@ matrix.in
 vector.in
 result.out
 .venv/
+*.log

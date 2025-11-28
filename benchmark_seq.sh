@@ -19,7 +19,8 @@ TIMES=$2
 BENCHMARK_DIR="benchmarks"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 LOG_FILE="${BENCHMARK_DIR}/benchmark-seq-n${N}-t${TIMES}-${TIMESTAMP}.log"
-JSON_FILE="${BENCHMARK_DIR}/benchmark_seq_n${N}.json"
+# Arquivo CSV no mesmo formato usado por benchmark.sh
+CSV_FILE="${BENCHMARK_DIR}/results-seq-n${N}-t${TIMES}-${TIMESTAMP}.csv"
 
 echo "Criando diretório de benchmarks..."
 mkdir -p ${BENCHMARK_DIR}
@@ -29,7 +30,7 @@ echo "Tamanho (n): $N"
 echo "Repetições (times): $TIMES"
 echo "------------------------------------"
 echo "Logs completos serão salvos em: $LOG_FILE"
-echo "Resultados JSON salvos em: $JSON_FILE"
+echo "Resultados CSV incrementais serão salvos em: $CSV_FILE"
 echo "------------------------------------"
 
 # --- 3. Loop de Execução e Coleta de Dados ---
@@ -37,6 +38,9 @@ declare -a solve_times_list
 
 # Limpa o arquivo de log para esta nova execução
 > "$LOG_FILE"
+
+# Cria/zera o CSV e escreve cabeçalho (mesmo formato de benchmark.sh)
+echo "n,run,result,times,log,status,timestamp" > "$CSV_FILE"
 
 # --- Coleta informações da máquina (Processador, RAM, GPU) ---
 CPU_INFO="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | sed -E 's/.*: //')"
@@ -59,11 +63,6 @@ if command -v nvidia-smi >/dev/null 2>&1; then
 elif command -v lspci >/dev/null 2>&1; then
     GPU_INFO="$(lspci 2>/dev/null | grep -iE 'vga|3d|display' | head -n1 | sed -E 's/^[^:]+: //')"
 fi
-
-# Sanitiza strings para JSON (escapa aspas se houver)
-CPU_INFO_JSON=$(printf '%s' "$CPU_INFO" | sed 's/"/\\"/g')
-RAM_INFO_JSON=$(printf '%s' "$RAM_INFO" | sed 's/"/\\"/g')
-GPU_INFO_JSON=$(printf '%s' "$GPU_INFO" | sed 's/"/\\"/g')
 
 # Escreve cabeçalho no log com informações da máquina
 echo "==== Benchmark seq iniciado: $TIMESTAMP ====" >> "$LOG_FILE"
@@ -100,11 +99,14 @@ for (( i=1; i<=$TIMES; i++ )); do
     if [ $execution_exit_code -ne 0 ]; then
         echo "Erro na execução $i: comando 'make run-seq' falhou com código de saída $execution_exit_code."
         echo "A saída (parcial ou completa) foi registrada em $LOG_FILE."
-        exit 2
+        run_ts=$(date +%s)
+        # Campos bsmode,bmulti,tfactor ficam vazios para o benchmark sequencial
+        printf '%s,%s,%s,%s,%s,%s,%s\n' "$N" "$i" "" "$TIMES" "$LOG_FILE" "ERROR" "$run_ts" >> "$CSV_FILE"
+        continue
     fi
     
     # Captura "Tempo total:"
-    solve_time=$(echo "$output" | grep "Tempo total:" | awk '{print $5}')
+    solve_time=$(echo "$output" | grep "Tempo total:" | awk '{print $4}')
     
     if [ -z "$solve_time" ]; then
         echo "Erro na execução $i: Não foi possível capturar o tempo total."
@@ -114,6 +116,11 @@ for (( i=1; i<=$TIMES; i++ )); do
     fi
     
     solve_times_list+=($solve_time)
+    
+    # Grava resultado incremental no CSV (mantendo colunas compatíveis com benchmark.sh)
+    run_ts=$(date +%s)
+    # Campos bsmode,bmulti,tfactor ficam vazios para o benchmark sequencial
+    printf '%s,%s,%s,%s,%s,%s,%s\n' "$N" "$i" "$solve_time" "$TIMES" "$LOG_FILE" "OK" "$run_ts" >> "$CSV_FILE"
 done
 
 echo "------------------------------------"
@@ -144,31 +151,4 @@ std_dev=$(echo "$stats_output" | tail -n 1)
 
 echo "Média: $average s"
 echo "Desvio Padrão: $std_dev s"
-
-# --- 5. Geração do JSON ---
-
-json_list=$(printf "%s," "${solve_times_list[@]}")
-json_list="[${json_list%,}]"
-
-cat << EOF > $JSON_FILE
-{
-  "parametros": {
-    "n": $N,
-    "times": $TIMES
-  },
-  "log": "$LOG_FILE",
-  "info_maquina": {
-    "cpu": "${CPU_INFO_JSON}",
-    "ram": "${RAM_INFO_JSON}",
-    "gpu": "${GPU_INFO_JSON}"
-  },
-  "tempos": $json_list,
-  "estatisticas": {
-    "media": $average,
-    "desvio_padrao": $std_dev
-  }
-}
-EOF
-
 echo "------------------------------------"
-echo "Resultados JSON salvos em: $JSON_FILE"
