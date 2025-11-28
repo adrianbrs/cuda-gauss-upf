@@ -1,3 +1,6 @@
+/***************************
+ * Adrian Cerbaro - 178304 *
+ ***************************/
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,10 +19,14 @@
  * Quando chamada a partir do device, também adiciona os índices do bloco e thread.
  */
 #ifdef __CUDA_ARCH__
-#define println(fmt, args...) printf("\e[2m[(%d,%d,%d) (%d,%d,%d)]\e[0m " fmt "\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y, threadIdx.z, ##args)
+#define fprintln(stream, fmt, args...) fprintf(stream, "\e[2m[(%d,%d,%d) (%d,%d,%d)]\e[0m " fmt "\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y, threadIdx.z, ##args)
 #else
-#define println(fmt, args...) printf(fmt "\n", ##args)
+#define fprintln(stream, fmt, args...) fprintf(stream, fmt "\n", ##args)
 #endif
+
+#define println(fmt, args...) fprintln(stdout, fmt, ##args)
+#define errorln(fmt, args...) fprintln(stderr, fmt, ##args)
+#define exiterr(fmt, args...) errorln(fmt, ##args); exit(EXIT_FAILURE)
 
 #ifdef DEBUG
 #define debug(fmt, args...) println(fmt, ##args)
@@ -47,6 +54,7 @@ void saveResult(double *A, double *b, double *x, int n);
 int  testLinearSystem(double *A, double *b, double *x, int n);
 void loadLinearSystem(int n, double *A, double *b);
 void solveLinearSystem(const double *A, const double *b, double *x, int n, cudaDeviceProp *props);
+void computeBlocksAndThreads(dim3 *blocks, dim3 *threads, cudaDeviceProp *props, int n);
 
 __global__ void kernel_GaussianElimination(double *A, double *b, int i, int n);
 __global__ void kernel__BackSubstitution(double *A, double *b, double *x, int n);
@@ -57,20 +65,22 @@ inline void ensureSuccess(cudaError_t op_result);
 int main(int argc, char **argv) {
 	char *name = argv[0];
 	if (argc < 2) {
-		println("Uso: %s <n>", name);
-		exit(EXIT_FAILURE);
+		exiterr("Uso: %s <n>", name);
 	}
 
 	println();
 
 	// Carrega o modo de back-substitution
-	if (getenv("BACK_SUBSTITUTION_MODE") != NULL) {
-		if (strcasecmp(getenv("BACK_SUBSTITUTION_MODE"), "host") == 0) {
+	char *bsmode = getenv("BACK_SUBSTITUTION_MODE");
+	if (bsmode != NULL) {
+		if (strcasecmp(bsmode, "host") == 0) {
 			BACK_SUBSTITUTION_MODE = Host;
-			println("Back-substitution mode: Host");
-		} else if (strcasecmp(getenv("BACK_SUBSTITUTION_MODE"), "device") == 0) {
+			println("Back-substitution: Host");
+		} else if (strcasecmp(bsmode, "device") == 0) {
 			BACK_SUBSTITUTION_MODE = Device;
-			println("Back-substitution mode: Device");
+			println("Back-substitution: Device");
+		} else {
+			exiterr("Back-substitution: modo \"%s\" inválido (deve ser \"host\" ou \"device\")", bsmode);
 		}
 	}
 	
@@ -110,7 +120,7 @@ void saveResult(double *A, double *b, double *x, int n) {
 	}
 	
 	for(i=0; i < n; i++){
-	    fprintf(res, "%.6f\n", x[i]);
+	    fprintln(res, "%.6f", x[i]);
     }
 	
 	fclose( res );
@@ -179,6 +189,13 @@ void solveLinearSystem(const double *A, const double *b, double *x, int n, cudaD
 	struct timespec tstart, tend;
 	clock_gettime(CLOCK_MONOTONIC, &tstart);
 
+	// Calcula quantidade de blocos e threads
+	dim3 blocks (1), threads (1);
+	computeBlocksAndThreads(&blocks, &threads, props, n);
+
+	println("Blocos: (%d, %d, %d)", blocks.x, blocks.y, blocks.z);
+	println("Threads: (%d, %d, %d)", threads.x, threads.y, threads.z);
+
 	for (int i = 0; i < (n - 1); ++i) {
 		kernel_GaussianElimination<<<7500, 1024>>>(A_d, b_d, i, n);
 	}
@@ -190,7 +207,7 @@ void solveLinearSystem(const double *A, const double *b, double *x, int n, cudaD
 	// Checar erros de lançamento antes de bloquear na cópia
 	cudaError_t error = cudaGetLastError();
 	if (error != cudaSuccess) {
-		fprintf(stderr, "Erro no lançamento do kernel: %s\n", cudaGetErrorString(error));
+		errorln("Erro no lançamento do kernel: %s\n", cudaGetErrorString(error));
 	}
 
 	// Copia bloqueante para o host
@@ -228,6 +245,29 @@ void solveLinearSystem(const double *A, const double *b, double *x, int n, cudaD
 
 	cudaFree(A_d);
 	cudaFree(b_d);
+}
+
+/**
+ * Calcula a quantidade de blocos e threads necessárias para resolver uma matrix de `n*n`.
+ */
+void computeBlocksAndThreads(dim3 *blocks, dim3 *threads, cudaDeviceProp *props, int n) {
+	int maxblocks_x = props->maxGridSize[0];
+    int maxblocks_y = props->maxGridSize[1];
+    int maxblocks_z = props->maxGridSize[2];
+	int max_threads = props->maxThreadsPerBlock;
+
+	// Vamos usar somente o eixo X para facilitar já que não ha limitações de threads por eixo
+	// (somente por bloco)
+	threads->y = threads->z = 1;
+	// Sempre tentamos usar `n` threads por bloco, já que cada thread fará a eliminação gaussiana
+	// de uma coluna em paralelo, então se threads = n, todas as colunas serão processadas em paralelo
+	threads->x = min(max_threads, n);
+
+	// Sempre tentamos usar `n` blocos no total, já que as linhas serão divididas entre os blocos
+	// então se blocos = n, todas as linhas serão processadas em paralelo
+	blocks->x = min(maxblocks_x, n);
+	blocks->y = min(maxblocks_y, (int) ceil(n / (double) blocks->x));
+	blocks->z = min(maxblocks_z, (int) ceil(n / ((double) blocks->x * blocks->y)));
 }
 
 /**
@@ -351,7 +391,7 @@ __device__ KernelIndexProps device_getSequentialProps() {
  */
 inline void ensureSuccess(cudaError_t op_result) {
     if (op_result != cudaSuccess) {
-        fprintf(stderr, "Operação CUDA falhou: %d\n", op_result);
+        errorln("Operação CUDA falhou: %d\n", op_result);
         exit(EXIT_FAILURE);
     }
 }
