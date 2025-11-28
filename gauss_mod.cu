@@ -19,14 +19,17 @@
  * Quando chamada a partir do device, também adiciona os índices do bloco e thread.
  */
 #ifdef __CUDA_ARCH__
-#define fprintln(stream, fmt, args...) fprintf(stream, "\e[2m[(%d,%d,%d) (%d,%d,%d)]\e[0m " fmt "\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y, threadIdx.z, ##args)
+// fprintf não é suportado no device, mas é preciso definir aqui para que o símbolo seja encontrado na compilação
+#define fprintln(stream, fmt, args...) fprintf(stream, fmt "\n", ##args)
+#define println(fmt, args...) printf("\e[2m[(%d,%d,%d) (%d,%d,%d)]\e[0m " fmt "\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y, threadIdx.z, ##args)
+#define errorln(fmt, args...) println(fmt, ##args)
+#define exiterr(fmt, args...) errorln(fmt, ##args); asm("exit")
 #else
 #define fprintln(stream, fmt, args...) fprintf(stream, fmt "\n", ##args)
-#endif
-
 #define println(fmt, args...) fprintln(stdout, fmt, ##args)
 #define errorln(fmt, args...) fprintln(stderr, fmt, ##args)
 #define exiterr(fmt, args...) errorln(fmt, ##args); exit(EXIT_FAILURE)
+#endif
 
 #ifdef DEBUG
 #define debug(fmt, args...) println(fmt, ##args)
@@ -34,7 +37,7 @@
 #define debug(fmt, args...)
 #endif
 
-enum BackSubstitutionMode {
+enum ManagementMode {
 	Host,
 	Device
 };
@@ -48,19 +51,34 @@ struct KernelIndexProps {
 };
 
 // Alterar entre Host e Device para testar eficiência
-BackSubstitutionMode BACK_SUBSTITUTION_MODE = Host;
+ManagementMode BACK_SUBSTITUTION_MODE = Host;
+
+int BLOCKS_MULTIPLIER = 4;
+int THREADS_FACTOR = 9;
 
 void saveResult(double *A, double *b, double *x, int n);
 int  testLinearSystem(double *A, double *b, double *x, int n);
 void loadLinearSystem(int n, double *A, double *b);
 void solveLinearSystem(const double *A, const double *b, double *x, int n, cudaDeviceProp *props);
-void computeBlocksAndThreads(dim3 *blocks, dim3 *threads, cudaDeviceProp *props, int n);
+void computeBlocksAndThreads(int *blocks, int *threads, cudaDeviceProp *props, int n);
 
 __global__ void kernel_GaussianElimination(double *A, double *b, int i, int n);
 __global__ void kernel__BackSubstitution(double *A, double *b, double *x, int n);
-__device__ KernelIndexProps device_getSequentialProps();
+__device__ KernelIndexProps device_getKernelIndexProps();
 
 inline void ensureSuccess(cudaError_t op_result);
+
+/**
+ * Função utilitária para obter o modo de gerenciamento (host ou device) a partir de uma variável de ambiente.
+ */
+inline ManagementMode getManagementModeEnv(const char *env_name, const ManagementMode default_mode) {
+	char *mode = getenv(env_name);
+	if (mode == NULL) return default_mode;
+	if (strcasecmp(mode, "host") == 0) return Host;
+	if (strcasecmp(mode, "device") == 0) return Device;
+	exiterr("Modo \"%s\" inválido (deve ser \"host\" ou \"device\")", mode);
+	return (ManagementMode) -1;
+}
 
 int main(int argc, char **argv) {
 	char *name = argv[0];
@@ -68,21 +86,17 @@ int main(int argc, char **argv) {
 		exiterr("Uso: %s <n>", name);
 	}
 
-	println();
-
 	// Carrega o modo de back-substitution
-	char *bsmode = getenv("BACK_SUBSTITUTION_MODE");
-	if (bsmode != NULL) {
-		if (strcasecmp(bsmode, "host") == 0) {
-			BACK_SUBSTITUTION_MODE = Host;
-			println("Back-substitution: Host");
-		} else if (strcasecmp(bsmode, "device") == 0) {
-			BACK_SUBSTITUTION_MODE = Device;
-			println("Back-substitution: Device");
-		} else {
-			exiterr("Back-substitution: modo \"%s\" inválido (deve ser \"host\" ou \"device\")", bsmode);
-		}
-	}
+	BACK_SUBSTITUTION_MODE = getManagementModeEnv("BACK_SUBSTITUTION_MODE", BACK_SUBSTITUTION_MODE);
+	
+	// Carrega configurações fixas de blocos e threads
+	if (getenv("BLOCKS_MULTIPLIER")) BLOCKS_MULTIPLIER = atoi(getenv("BLOCKS_MULTIPLIER"));
+	if (getenv("THREADS_FACTOR")) THREADS_FACTOR = atoi(getenv("THREADS_FACTOR"));
+
+	println();
+	println("BACK_SUBSTITUTION_MODE: %s", BACK_SUBSTITUTION_MODE == Host ? "Host" : "Device");
+	println("BLOCKS_MULTIPLIER: %d", BLOCKS_MULTIPLIER);
+	println("THREADS_FACTOR: %d", THREADS_FACTOR);
 	
 	int n = atoi(argv[1]);
 	int nerros = 0, devid;
@@ -190,15 +204,21 @@ void solveLinearSystem(const double *A, const double *b, double *x, int n, cudaD
 	clock_gettime(CLOCK_MONOTONIC, &tstart);
 
 	// Calcula quantidade de blocos e threads
-	dim3 blocks (1), threads (1);
+	int blocks, threads;
 	computeBlocksAndThreads(&blocks, &threads, props, n);
 
-	println("Blocos: (%d, %d, %d)", blocks.x, blocks.y, blocks.z);
-	println("Threads: (%d, %d, %d)", threads.x, threads.y, threads.z);
+	println("Blocos: %d", blocks);
+	println("Threads: %d", threads);
 
+	// Eliminação Gaussiana
 	for (int i = 0; i < (n - 1); ++i) {
-		kernel_GaussianElimination<<<7500, 1024>>>(A_d, b_d, i, n);
+		// Recalcula os blocos a cada pivô para evitar lançar um kernel muito maior
+		// do que o necessário nas iterações finais
+		blocks = min(blocks, n - i - 1);
+		if (blocks < 1) blocks = 1;
+		kernel_GaussianElimination<<<blocks, threads>>>(A_d, b_d, i, n);
 	}
+
 	// Back-substitution no device
 	if (BACK_SUBSTITUTION_MODE == Device) {
 		kernel__BackSubstitution<<<1, 1>>>(A_d, b_d, x_d, n);
@@ -210,8 +230,8 @@ void solveLinearSystem(const double *A, const double *b, double *x, int n, cudaD
 		errorln("Erro no lançamento do kernel: %s\n", cudaGetErrorString(error));
 	}
 
-	// Copia bloqueante para o host
 	if (BACK_SUBSTITUTION_MODE == Device) {
+		// Copia bloqueante para o host
 		ensureSuccess(cudaMemcpy(x, x_d, xsize, cudaMemcpyDeviceToHost));
 		cudaFree(x_d);
 	} else {
@@ -250,24 +270,9 @@ void solveLinearSystem(const double *A, const double *b, double *x, int n, cudaD
 /**
  * Calcula a quantidade de blocos e threads necessárias para resolver uma matrix de `n*n`.
  */
-void computeBlocksAndThreads(dim3 *blocks, dim3 *threads, cudaDeviceProp *props, int n) {
-	int maxblocks_x = props->maxGridSize[0];
-    int maxblocks_y = props->maxGridSize[1];
-    int maxblocks_z = props->maxGridSize[2];
-	int max_threads = props->maxThreadsPerBlock;
-
-	// Vamos usar somente o eixo X para facilitar já que não ha limitações de threads por eixo
-	// (somente por bloco)
-	threads->y = threads->z = 1;
-	// Sempre tentamos usar `n` threads por bloco, já que cada thread fará a eliminação gaussiana
-	// de uma coluna em paralelo, então se threads = n, todas as colunas serão processadas em paralelo
-	threads->x = min(max_threads, n);
-
-	// Sempre tentamos usar `n` blocos no total, já que as linhas serão divididas entre os blocos
-	// então se blocos = n, todas as linhas serão processadas em paralelo
-	blocks->x = min(maxblocks_x, n);
-	blocks->y = min(maxblocks_y, (int) ceil(n / (double) blocks->x));
-	blocks->z = min(maxblocks_z, (int) ceil(n / ((double) blocks->x * blocks->y)));
+inline void computeBlocksAndThreads(int *blocks, int *threads, cudaDeviceProp *props, int n) {
+	*blocks = min(props->multiProcessorCount * BLOCKS_MULTIPLIER, props->maxGridSize[0]);
+	*threads = max(1, min(n, min(props->maxThreadsPerBlock, (int) pow(2, THREADS_FACTOR))));
 }
 
 /**
@@ -276,16 +281,17 @@ void computeBlocksAndThreads(dim3 *blocks, dim3 *threads, cudaDeviceProp *props,
  * @param A Matriz de coeficientes
  * @param b Vetor de termos independentes
  * @param i Índice da linha do pivô
- * @param i Índice do pivô atual
  * @param n Tamanho da matriz (`n x n`)
  */
 __global__ void kernel_GaussianElimination(double *A, double *b, int i, int n) {
-	KernelIndexProps props = device_getSequentialProps();
+	KernelIndexProps props = device_getKernelIndexProps();
+	bool active = true;
 
 	// thread atual já é maior que a quantidade de elementos a serem processados por linha
 	// ou bloco atual já é maior que a quantidade de linhas a serem processadas
 	if (props.thread_idx >= n || props.block_idx >= n) {
-		return;
+		debug("Número de threads ou blocos maior que N, isso pode resultar em erros inesperados.");
+		active = false;
 	}
 
 	// l_idx       = índice da linha sendo processada abaixo do pivô
@@ -313,13 +319,16 @@ __global__ void kernel_GaussianElimination(double *A, double *b, int i, int n) {
 		l_idx_start += l_idx_jumps * props.blocks;
 	}
 
-	if (props.idx == 0) {
+	if (props.thread_idx == 0) {
 		debug(">>> i=%d, rounds=%d, rem_n=%d, l_idx_start=%d, blocks=%d", i, rounds, rem_n, l_idx_start, props.blocks);
 	}
 
 	for (l_idx = l_idx_start; l_idx < n; l_idx += props.blocks) {
 		ratio = A[l_idx * n + i] / pivot;
 		__syncthreads();
+
+		// Evita "bagunçar" com os dados caso a quantidade de blocos/threads seja alocada de forma incorreta
+		if (!active) continue;
 
 		debug("i=%d, l_idx=%d", i, l_idx);
 
@@ -345,7 +354,7 @@ __global__ void kernel_GaussianElimination(double *A, double *b, int i, int n) {
  * É vantajoso?
  */
 __global__ void kernel__BackSubstitution(double *A, double *b, double *x, int n) {
-	KernelIndexProps props = device_getSequentialProps();
+	KernelIndexProps props = device_getKernelIndexProps();
 	// processa somente na primeira thread do primeiro bloco
 	if (props.idx == 0) {
 		int i, j;
@@ -365,7 +374,7 @@ __global__ void kernel__BackSubstitution(double *A, double *b, double *x, int n)
 /**
  * Retorna índices sequenciais para a thread e o bloco, como se ambos fossem vetores e não matrizes.
  */
-__device__ KernelIndexProps device_getSequentialProps() {
+__device__ KernelIndexProps device_getKernelIndexProps() {
 	// total de blocos
     int blocks = gridDim.x * gridDim.y * gridDim.z;
 	// total de threads por bloco
