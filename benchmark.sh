@@ -70,7 +70,7 @@ IFS=',' read -r -a TFACTORS <<< "$TFACTOR"
 
 set_id=0
 # Cabeçalho CSV (cria/reescreve no início da execução)
-echo "n,bsmode,bmulti,tfactor,run,result,times,log,status,timestamp" > "$CSV_FILE"
+echo "n,bsmode,bmulti,tfactor,blocks,threads,run,result,times,log,status,timestamp" > "$CSV_FILE"
 
 print_head() {
   echo "==== Benchmark iniciado: $TIMESTAMP ===="
@@ -195,19 +195,21 @@ for bsmode in "${BSMODES[@]}"; do
           break
         fi
 
-        run_ts=$(date +%s)
+        blocks=$(echo "$output" | grep "Blocos:" | awk '{print $2}')
+        threads=$(echo "$output" | grep "Threads:" | awk '{print $2}')
 
+        run_ts=$(date +%s)
         solve_time=$(echo "$output" | grep "Tempo total" | awk '{print $4}')
         if [ -z "$solve_time" ]; then
           echo "Não foi possível capturar 'Tempo total' para combo ${set_id} run ${run_i}. Veja $LOG_FILE_C." | tee -a "$MASTER_LOG"
-          printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$N" "$bsmode" "$bmulti" "$tfactor" "$run_i" "" "$TIMES" "$LOG_FILE_C" "ERROR" "$run_ts" >> "$CSV_FILE"
+          printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$N" "$bsmode" "$bmulti" "$tfactor" "$blocks" "$threads" "$run_i" "" "$TIMES" "$LOG_FILE_C" "ERROR" "$run_ts" >> "$CSV_FILE"
           break
         fi
 
         solve_times_list+=($solve_time)
 
         echo "Tempo: ${solve_time} s"
-        printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$N" "$bsmode" "$bmulti" "$tfactor" "$run_i" "$solve_time" "$TIMES" "$LOG_FILE_C" "OK" "$run_ts" >> "$CSV_FILE"
+        printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$N" "$bsmode" "$bmulti" "$tfactor" "$blocks" "$threads" "$run_i" "$solve_time" "$TIMES" "$LOG_FILE_C" "OK" "$run_ts" >> "$CSV_FILE"
 
         # Atualiza estruturas para estimativa robusta
         # atualiza soma e contador global incremental
