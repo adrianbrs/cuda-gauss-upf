@@ -37,6 +37,8 @@
 #define debug(fmt, args...)
 #endif
 
+#define GB_IN_BYTES (1024 * 1024 * 1024)
+
 enum ManagementMode {
 	Host,
 	Device
@@ -53,13 +55,13 @@ struct KernelIndexProps {
 // Alterar entre Host e Device para testar eficiência
 ManagementMode BACK_SUBSTITUTION_MODE = Host;
 
-int BLOCKS_MULTIPLIER = 4;
-int THREADS_FACTOR = 9;
+int BLOCKS = -1;
+int THREADS = -1;
 
 void saveResult(double *A, double *b, double *x, int n);
 int  testLinearSystem(double *A, double *b, double *x, int n);
 void loadLinearSystem(int n, double *A, double *b);
-void solveLinearSystem(const double *A, const double *b, double *x, int n, cudaDeviceProp *props);
+void solveLinearSystem(const double *A, const double *b, double *x, int n);
 void computeBlocksAndThreads(int *blocks, int *threads, cudaDeviceProp *props, int n);
 
 __global__ void kernel_GaussianElimination(double *A, double *b, int i, int n);
@@ -90,21 +92,21 @@ int main(int argc, char **argv) {
 	BACK_SUBSTITUTION_MODE = getManagementModeEnv("BACK_SUBSTITUTION_MODE", BACK_SUBSTITUTION_MODE);
 	
 	// Carrega configurações fixas de blocos e threads
-	if (getenv("BLOCKS_MULTIPLIER")) BLOCKS_MULTIPLIER = atoi(getenv("BLOCKS_MULTIPLIER"));
-	if (getenv("THREADS_FACTOR")) THREADS_FACTOR = atoi(getenv("THREADS_FACTOR"));
+	if (getenv("BLOCKS")) BLOCKS = atoi(getenv("BLOCKS"));
+	if (getenv("THREADS")) THREADS = atoi(getenv("THREADS"));
 
 	println();
+	println("+----- Variáveis de Ambiente ------+");
 	println("BACK_SUBSTITUTION_MODE: %s", BACK_SUBSTITUTION_MODE == Host ? "Host" : "Device");
-	println("BLOCKS_MULTIPLIER: %d", BLOCKS_MULTIPLIER);
-	println("THREADS_FACTOR: %d", THREADS_FACTOR);
+	println("BLOCKS: %d", BLOCKS);
+	println("THREADS: %d", THREADS);
+	println("+---------------------------------+");
+	println();
 	
 	int n = atoi(argv[1]);
-	int nerros = 0, devid;
-	struct cudaDeviceProp props;
+	int nerros = 0;
 
 	ensureSuccess(cudaSetDevice(0));
-    ensureSuccess(cudaGetDevice(&devid));
-    ensureSuccess(cudaGetDeviceProperties(&props, devid));
 
 	double *A = (double *) malloc(n * n * sizeof(double));
 	double *b = (double *) malloc(n * sizeof(double));
@@ -112,7 +114,7 @@ int main(int argc, char **argv) {
 
     loadLinearSystem(n, &A[0], &b[0]);
       
-    solveLinearSystem(&A[0], &b[0], &x[0], n, &props);
+    solveLinearSystem(&A[0], &b[0], &x[0], n);
 
 	nerros += testLinearSystem(&A[0], &b[0], &x[0], n);
 
@@ -121,6 +123,10 @@ int main(int argc, char **argv) {
     saveResult(&A[0], &b[0], &x[0], n);
     
 	return EXIT_SUCCESS;
+}
+
+int runMain(int argc, char **argv) {
+	return main(argc, argv);
 }
 
 void saveResult(double *A, double *b, double *x, int n) {	
@@ -184,7 +190,42 @@ void loadLinearSystem(int n, double *A, double *b) {
 	fclose ( vet );			
 }
 
-void solveLinearSystem(const double *A, const double *b, double *x, int n, cudaDeviceProp *props) {
+void solveLinearSystem(const double *A, const double *b, double *x, int n) {
+	int devid, clockRateKHz;
+	struct cudaDeviceProp props;
+
+	ensureSuccess(cudaGetDevice(&devid));
+    ensureSuccess(cudaGetDeviceProperties(&props, devid));
+	ensureSuccess(cudaDeviceGetAttribute(&clockRateKHz, cudaDevAttrClockRate, devid));
+	
+	// Calcula quantidade de blocos e threads
+	int blocks, threads;
+	computeBlocksAndThreads(&blocks, &threads, &props, n);
+
+	cudaFuncAttributes attr;
+	cudaFuncGetAttributes(&attr, kernel_GaussianElimination);
+
+	println("+------- Informações Gerais -------+");
+	println("Nome da GPU: %s", props.name);
+	println("Blocos: %d", blocks);
+	println("Threads: %d", threads);
+	println("Threads por bloco: %d", props.maxThreadsPerBlock);
+	println("Threads por SM: %d", props.maxThreadsPerMultiProcessor);
+	println("Blocos por SM: %d", props.maxBlocksPerMultiProcessor);
+	println("SMs: %d", props.multiProcessorCount);
+	println("Clock: %d MHz", clockRateKHz / 1000);
+	println("Warp Size: %d", props.warpSize);
+	println("Registradores usados: %d", attr.numRegs);
+	println("Memória Local (Spill) usada: %ld bytes", attr.localSizeBytes);
+	println("Registradores por Bloco: %d", props.regsPerBlock);
+	println("Registradores por SM: %d", props.regsPerMultiprocessor);
+	println("+---------------------------------+");
+	println();
+
+	// Medição simples do tempo total
+	struct timespec tstart, tend;
+	clock_gettime(CLOCK_MONOTONIC, &tstart);
+
 	size_t Asize = n * n * sizeof(double);
 	size_t bsize = n * sizeof(double);
 	size_t xsize = n * sizeof(double);
@@ -198,17 +239,6 @@ void solveLinearSystem(const double *A, const double *b, double *x, int n, cudaD
 
 	ensureSuccess(cudaMemcpy(A_d, A, Asize, cudaMemcpyHostToDevice));
 	ensureSuccess(cudaMemcpy(b_d, b, bsize, cudaMemcpyHostToDevice));
-
-	// Medição simples do tempo total
-	struct timespec tstart, tend;
-	clock_gettime(CLOCK_MONOTONIC, &tstart);
-
-	// Calcula quantidade de blocos e threads
-	int blocks, threads;
-	computeBlocksAndThreads(&blocks, &threads, props, n);
-
-	println("Blocos: %d", blocks);
-	println("Threads: %d", threads);
 
 	// Eliminação Gaussiana
 	for (int i = 0; i < (n - 1); ++i) {
@@ -259,9 +289,10 @@ void solveLinearSystem(const double *A, const double *b, double *x, int n, cudaD
 	clock_gettime(CLOCK_MONOTONIC, &tend);
 	double elapsed = (tend.tv_sec - tstart.tv_sec) + (tend.tv_nsec - tstart.tv_nsec) / 1e9;
 
-	println("+----------------------------------+");
+	println("+--------- Resultados -------------+");
 	println("+ Tempo total: %f s", elapsed);
 	println("+----------------------------------+");
+	println();
 
 	cudaFree(A_d);
 	cudaFree(b_d);
@@ -271,8 +302,15 @@ void solveLinearSystem(const double *A, const double *b, double *x, int n, cudaD
  * Calcula a quantidade de blocos e threads necessárias para resolver uma matrix de `n*n`.
  */
 inline void computeBlocksAndThreads(int *blocks, int *threads, cudaDeviceProp *props, int n) {
-	*blocks = min(props->multiProcessorCount * BLOCKS_MULTIPLIER, props->maxGridSize[0]);
-	*threads = max(1, min(n, min(props->maxThreadsPerBlock, (int) pow(2, THREADS_FACTOR))));
+	if (BLOCKS > 0) *blocks = BLOCKS;
+	else  *blocks = props->multiProcessorCount * 32;
+	if (*blocks > props->maxGridSize[0]) *blocks = props->maxGridSize[0];
+
+	if (THREADS > 0) *threads = THREADS;
+	else *threads = 512;
+	if (*threads > props->maxThreadsPerBlock) *threads = props->maxThreadsPerBlock;
+	else if (*threads > n) *threads = n;
+	else if (*threads <= 0) *threads = 1;
 }
 
 /**

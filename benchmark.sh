@@ -4,21 +4,21 @@ set -e
 set -o pipefail
 
 if [ "$#" -ne 5 ]; then
-    echo "Uso: $0 <n> <bsmode> <bmulti> <tfactor> <times>"
+    echo "Uso: $0 <n> <bsmode> <blocks> <threads> <times>"
     echo "Exemplo: ./benchmark.sh 3000 device 4 9 5"
     exit 1
 fi
 
 N=$1
 BSMODE=$2
-BMULTI=$3
-TFACTOR=$4
+BLOCKS=$3
+THREADS=$4
 TIMES=$5
 
 BENCHMARK_DIR="benchmarks"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 MASTER_LOG="${BENCHMARK_DIR}/benchmark-master-n${N}-t${TIMES}-${TIMESTAMP}.log"
-LOG_FILE="${BENCHMARK_DIR}/benchmark-n${N}-bsmode${BSMODE}-bmulti${BMULTI}-tfactor${TFACTOR}-t${TIMES}-${TIMESTAMP}.log"
+LOG_FILE="${BENCHMARK_DIR}/benchmark-n${N}-bsmode${BSMODE}-blocks${BLOCKS}-threads${THREADS}-t${TIMES}-${TIMESTAMP}.log"
 CSV_FILE="${BENCHMARK_DIR}/results-n${N}-t${TIMES}-${TIMESTAMP}.csv"
 
 echo "Criando diretório de benchmarks..."
@@ -53,11 +53,31 @@ else
 fi
 
 GPU_INFO="Unknown"
+GPU_MEM="Unknown"
+GPU_CLOCK="Unknown"
 if command -v nvidia-smi >/dev/null 2>&1; then
+    # Nome
     GPU_INFO="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1)"
+    # Memória total (ex: 8192 MiB)
+    GPU_MEM="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader 2>/dev/null | head -n1)"
+    # Clock de gráficos (tenta current, senão max)
+    GPU_CLOCK="$(nvidia-smi --query-gpu=clocks.current.graphics --format=csv,noheader 2>/dev/null | head -n1)"
+    if [ -z "$GPU_CLOCK" ]; then
+      GPU_CLOCK="$(nvidia-smi --query-gpu=clocks.max.graphics --format=csv,noheader 2>/dev/null | head -n1)"
+    fi
 elif command -v lspci >/dev/null 2>&1; then
     GPU_INFO="$(lspci 2>/dev/null | grep -iE 'vga|3d|display' | head -n1 | sed -E 's/^[^:]+: //')"
 fi
+
+# Compose a one-line GPU summary
+if [ "$GPU_INFO" != "Unknown" ]; then
+  GPU_SUMMARY="$GPU_INFO"
+  GPU_SUMMARY+=" | Memory: ${GPU_MEM}"
+  GPU_SUMMARY+=" | Clock: ${GPU_CLOCK}"
+else
+  GPU_SUMMARY="$GPU_INFO"
+fi
+GPU_INFO="$GPU_SUMMARY"
 
 # Compile uma vez antes do loop
 echo "Compilando binário via make..." | tee -a "$MASTER_LOG"
@@ -65,19 +85,21 @@ make build >> "$MASTER_LOG" 2>&1 || { echo "Erro: falha ao compilar com make. Ve
 
 # Parse CSV lists
 IFS=',' read -r -a BSMODES <<< "$BSMODE"
-IFS=',' read -r -a BMULTIS <<< "$BMULTI"
-IFS=',' read -r -a TFACTORS <<< "$TFACTOR"
+IFS=',' read -r -a BLOCKS_SET <<< "$BLOCKS"
+IFS=',' read -r -a THREADS_SET <<< "$THREADS"
 
 set_id=0
 # Cabeçalho CSV (cria/reescreve no início da execução)
-echo "n,bsmode,bmulti,tfactor,blocks,threads,run,result,times,log,status,timestamp" > "$CSV_FILE"
+if [[ ! -f "$CSV_FILE" || -z "$(head -n 1 \"$CSV_FILE\")" ]]; then
+  echo "n,bsmode,blocks,threads,max_threads_per_block,max_threads_per_sm,max_blocks_per_sm,sm_count,clock_mhz,warp_size,run,result,times,log,status,timestamp" > "$CSV_FILE"
+fi
 
 print_head() {
   echo "==== Benchmark iniciado: $TIMESTAMP ===="
   echo "Tamanho (n): $N"
   echo "Back-Substitution Mode: $BSMODE"
-  echo "Block Multiplier: $BMULTI"
-  echo "Thread Factor: $TFACTOR"
+  echo "Blocos: $BLOCKS"
+  echo "Threads: $THREADS"
   echo "Repetições (times): $TIMES"
   echo "------------------------------------"
   echo "Logs completos serão salvos em: $LOG_FILE"
@@ -124,7 +146,8 @@ print_progress() {
           END {
             n=NR;
             if(n==0){ print "0"; exit }
-            trim=floor(n*tf+0.0000001);
+            # some awk variants do not provide floor(); use int() which truncates toward 0
+            trim=int(n*tf+0.0000001);
             start=trim+1; end=n-trim;
             if(end<start){ start=1; end=n }
             sum=0; cnt=0;
@@ -149,7 +172,7 @@ print_progress() {
 
 # Global counters for progress
 # Compute totals for the progress bar
-global_total_combos=$(( ${#BSMODES[@]} * ${#BMULTIS[@]} * ${#TFACTORS[@]} ))
+global_total_combos=$(( ${#BSMODES[@]} * ${#BLOCKS_SET[@]} * ${#THREADS_SET[@]} ))
 global_total_runs=$(( global_total_combos * TIMES ))
 global_run_counter=0
 
@@ -162,12 +185,12 @@ print_step() {
 print_step
 
 for bsmode in "${BSMODES[@]}"; do
-  for bmulti in "${BMULTIS[@]}"; do
-    for tfactor in "${TFACTORS[@]}"; do
+  for blocks in "${BLOCKS_SET[@]}"; do
+    for threads in "${THREADS_SET[@]}"; do
       set_id=$((set_id+1))
-      LOG_FILE_C="${BENCHMARK_DIR}/benchmark-n${N}-bsmode${bsmode}-bmulti${bmulti}-tfactor${tfactor}-t${TIMES}-${TIMESTAMP}.log"
+      LOG_FILE_C="${BENCHMARK_DIR}/benchmark-n${N}-bsmode${bsmode}-blocks${blocks}-threads${threads}-t${TIMES}-${TIMESTAMP}.log"
       
-      echo "=== Combo #${set_id}: bsmode=${bsmode}, BLOCK_MULTIPLIER=${bmulti}, THREAD_FACTOR=${tfactor} ===" | tee -a "$MASTER_LOG"
+      echo "=== Combo #${set_id}: bsmode=${bsmode}, blocks=${blocks}, threads=${threads} ===" | tee -a "$MASTER_LOG"
       > "$LOG_FILE_C"
 
       # Executa TIMES repetições para esta combinação
@@ -175,12 +198,17 @@ for bsmode in "${BSMODES[@]}"; do
       for (( run_i=1; run_i<=$TIMES; run_i++ )); do
         echo "[$set_id] Execução $run_i/$TIMES..." | tee -a "$LOG_FILE_C"
         
-        cmd="make run n=${N} bsmode=${bsmode} bmulti=${bmulti} tfactor=${tfactor}"
+        cmd="make run n=${N} bsmode=${bsmode} blocks=${blocks} threads=${threads}"
         echo "> $cmd"
 
+        # medir tempo real de execução (wall-clock) para uso no ETA
+        start_time=$(date +%s.%N)
         set +e
         output=$($cmd 2>&1 | tee -a "$LOG_FILE_C")
         execution_exit_code=${PIPESTATUS[0]}
+        end_time=$(date +%s.%N)
+        # calcula tempo medido (em segundos, float)
+        measured_time=$(awk -v s="$start_time" -v e="$end_time" 'BEGIN{printf "%.6f", e - s}')
         # update global run counter and progress bar regardless of success
         global_run_counter=$((global_run_counter+1))
 
@@ -197,28 +225,34 @@ for bsmode in "${BSMODES[@]}"; do
 
         blocks=$(echo "$output" | grep "Blocos:" | awk '{print $2}')
         threads=$(echo "$output" | grep "Threads:" | awk '{print $2}')
+        max_threads_per_block=$(echo "$output" | grep "Threads por bloco:" | awk '{print $4}')
+        max_threads_per_sm=$(echo "$output" | grep "Threads por SM:" | awk '{print $4}')
+        sm_count=$(echo "$output" | grep "SMs:" | awk '{print $2}')
+        clock=$(echo "$output" | grep "Clock:" | awk '{print $2}')
+        warp_size=$(echo "$output" | grep "Warp Size:" | awk '{print $3}')
+        max_blocks_per_sm=$(echo "$output" | grep "Blocos por SM:" | awk '{print $4}')
 
         run_ts=$(date +%s)
         solve_time=$(echo "$output" | grep "Tempo total" | awk '{print $4}')
         if [ -z "$solve_time" ]; then
           echo "Não foi possível capturar 'Tempo total' para combo ${set_id} run ${run_i}. Veja $LOG_FILE_C." | tee -a "$MASTER_LOG"
-          printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$N" "$bsmode" "$bmulti" "$tfactor" "$blocks" "$threads" "$run_i" "" "$TIMES" "$LOG_FILE_C" "ERROR" "$run_ts" >> "$CSV_FILE"
+          printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$N" "$bsmode" "$blocks" "$threads" "$max_threads_per_block" "$max_threads_per_sm" "$max_blocks_per_sm" "$sm_count" "$clock" "$warp_size" "$run_i" "" "$TIMES" "$LOG_FILE_C" "ERROR" "$run_ts" >> "$CSV_FILE"
           break
         fi
 
         solve_times_list+=($solve_time)
 
         echo "Tempo: ${solve_time} s"
-        printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$N" "$bsmode" "$bmulti" "$tfactor" "$blocks" "$threads" "$run_i" "$solve_time" "$TIMES" "$LOG_FILE_C" "OK" "$run_ts" >> "$CSV_FILE"
+        printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$N" "$bsmode" "$blocks" "$threads" "$max_threads_per_block" "$max_threads_per_sm" "$max_blocks_per_sm" "$sm_count" "$clock" "$warp_size" "$run_i" "$solve_time" "$TIMES" "$LOG_FILE_C" "OK" "$run_ts" >> "$CSV_FILE"
 
-        # Atualiza estruturas para estimativa robusta
+        # Atualiza estruturas para estimativa robusta usando o tempo medido (wall-clock)
         # atualiza soma e contador global incremental
-        global_sum_measured_runs=$(awk -v s="$global_sum_measured_runs" -v v="$solve_time" 'BEGIN{printf "%.6f", s+v}')
+        global_sum_measured_runs=$(awk -v s="$global_sum_measured_runs" -v v="$measured_time" 'BEGIN{printf "%.6f", s+v}')
         global_total_measured_runs=$((global_total_measured_runs + 1))
         global_average_time=$(awk -v s="$global_sum_measured_runs" -v c="$global_total_measured_runs" 'BEGIN{ if(c>0) printf "%.6f", s/c; else print "0" }')
 
-        # adiciona à janela recente (circular)
-        recent_runs+=("$solve_time")
+        # adiciona à janela recente (circular) o tempo medido (em segundos)
+        recent_runs+=("$measured_time")
         # se excedeu a janela, remove o mais antigo (shift)
         if [ ${#recent_runs[@]} -gt $RECENT_WINDOW_SIZE ]; then
           recent_runs=("${recent_runs[@]:1}")

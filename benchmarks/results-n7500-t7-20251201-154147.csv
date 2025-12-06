@@ -1,0 +1,15 @@
+n,bsmode,blocks,threads,max_threads_per_block,max_threads_per_sm,max_blocks_per_sm,sm_count,clock_mhz,warp_size,run,result,times,log,status,timestamp
+7500,host,616,64,1024,1024,16,22,1785,32,1,16.323720,7,benchmarks/benchmark-n7500-bsmodehost-blocks616-threads64-t7-20251201-154147.log,OK,1764614535
+7500,host,616,64,1024,1024,16,22,1785,32,2,16.256100,7,benchmarks/benchmark-n7500-bsmodehost-blocks616-threads64-t7-20251201-154147.log,OK,1764614561
+7500,host,616,64,1024,1024,16,22,1785,32,3,17.562908,7,benchmarks/benchmark-n7500-bsmodehost-blocks616-threads64-t7-20251201-154147.log,OK,1764614588
+7500,host,616,64,1024,1024,16,22,1785,32,4,19.482214,7,benchmarks/benchmark-n7500-bsmodehost-blocks616-threads64-t7-20251201-154147.log,OK,1764614617
+7500,host,616,64,1024,1024,16,22,1785,32,5,18.714587,7,benchmarks/benchmark-n7500-bsmodehost-blocks616-threads64-t7-20251201-154147.log,OK,1764614646
+7500,host,616,64,1024,1024,16,22,1785,32,6,17.238197,7,benchmarks/benchmark-n7500-bsmodehost-blocks616-threads64-t7-20251201-154147.log,OK,1764614673
+7500,host,616,64,1024,1024,16,22,1785,32,7,20.185054,7,benchmarks/benchmark-n7500-bsmodehost-blocks616-threads64-t7-20251201-154147.log,OK,1764614703
+7500,host,814,64,1024,1024,16,22,1785,32,1,20.563273,7,benchmarks/benchmark-n7500-bsmodehost-blocks814-threads64-t7-20251201-154147.log,OK,1764614733
+7500,host,814,64,1024,1024,16,22,1785,32,2,20.611221,7,benchmarks/benchmark-n7500-bsmodehost-blocks814-threads64-t7-20251201-154147.log,OK,1764614764
+7500,host,814,64,1024,1024,16,22,1785,32,3,16.718011,7,benchmarks/benchmark-n7500-bsmodehost-blocks814-threads64-t7-20251201-154147.log,OK,1764614790
+7500,host,814,64,1024,1024,16,22,1785,32,4,16.817857,7,benchmarks/benchmark-n7500-bsmodehost-blocks814-threads64-t7-20251201-154147.log,OK,1764614817
+7500,host,814,64,1024,1024,16,22,1785,32,5,18.343476,7,benchmarks/benchmark-n7500-bsmodehost-blocks814-threads64-t7-20251201-154147.log,OK,1764614845
+7500,host,814,64,1024,1024,16,22,1785,32,6,18.031597,7,benchmarks/benchmark-n7500-bsmodehost-blocks814-threads64-t7-20251201-154147.log,OK,1764614873
+7500,host,814,64,1024,1024,16,22,1785,32,7,16.537013,7,benchmarks/benchmark-n7500-bsmodehost-blocks814-threads64-t7-20251201-154147.log,OK,1764614899
