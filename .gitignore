@@ -5,3 +5,4 @@ vector.in
 result.out
 .venv/
 *.log
+*.zip
